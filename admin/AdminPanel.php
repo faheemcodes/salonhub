@@ -3,188 +3,240 @@
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
-// Database connection
-$connect = mysqli_connect('localhost', 'root', '', 'saloon');
-if (!$connect) {
-    die("❌ Connection failed: " . mysqli_connect_error());
-}
+// Start session for authentication
+session_start();
 
-// Handle extend and delete actions
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
-    if ($_POST['action'] === 'extend') {
-        $vendor_id = (int)$_POST['vendor_id'];
-        $shop_id = (int)$_POST['shop_id'];
-        $months = (int)$_POST['months'];
-        
-        // Get current end date for this specific shop
-        $query = "SELECT account_date FROM vendor_accounts WHERE id = $vendor_id AND shop_id = $shop_id";
-        $result = mysqli_query($connect, $query);
-        if ($result && mysqli_num_rows($result) > 0) {
-            $row = mysqli_fetch_assoc($result);
-            $current_date = $row['account_date'];
-            $new_date = date('Y-m-d', strtotime($current_date . " +$months month"));
-            
-            // Update account date for this specific shop
-            $update_query = "UPDATE vendor_accounts SET account_date = '$new_date' WHERE id = $vendor_id AND shop_id = $shop_id";
-            if (mysqli_query($connect, $update_query)) {
-                // Refresh the page to show updated data
-                header("Location: ".$_SERVER['PHP_SELF']);
-                exit;
-            } else {
-                $error = "Error extending subscription: " . mysqli_error($connect);
-            }
-        }
-    } elseif ($_POST['action'] === 'delete_vendor') {
-        $vendor_id = (int)$_POST['vendor_id'];
-        $shop_id = (int)$_POST['shop_id'];
-        $delete_query = "DELETE FROM vendor_accounts WHERE id = $vendor_id AND shop_id = $shop_id";
-        if (mysqli_query($connect, $delete_query)) {
-            // Refresh the page to show updated data
-            header("Location: ".$_SERVER['PHP_SELF']);
-            exit;
-        } else {
-            $error = "Error deleting vendor: " . mysqli_error($connect);
-        }
-    } elseif ($_POST['action'] === 'delete_request') {
-        $shop_id = (int)$_POST['shop_id'];
-        $delete_query = "DELETE FROM register_shop WHERE id = $shop_id";
-        if (mysqli_query($connect, $delete_query)) {
-            // Refresh the page to show updated data
-            header("Location: ".$_SERVER['PHP_SELF']);
-            exit;
-        } else {
-            $error = "Error deleting registration request: " . mysqli_error($connect);
-        }
-    } elseif ($_POST['action'] === 'delete_shop') {
-        $cnic = mysqli_real_escape_string($connect, $_POST['cnic']);
-        $shop_id = (int)$_POST['shop_id'];
-        
-        // Start transaction
-        mysqli_begin_transaction($connect);
-        
-        try {
-            // 1. Delete from vendor_accounts table for this specific shop
-            $delete_vendor_query = "DELETE FROM vendor_accounts WHERE shop_id = $shop_id AND cnic = '$cnic'";
-            if (!mysqli_query($connect, $delete_vendor_query)) {
-                throw new Exception("Failed to delete from vendor_accounts: " . mysqli_error($connect));
-            }
-            
-            // 2. Delete from register_shop table
-            $delete_shop_query = "DELETE FROM register_shop WHERE id = $shop_id AND cnic = '$cnic'";
-            if (!mysqli_query($connect, $delete_shop_query)) {
-                throw new Exception("Failed to delete from register_shop: " . mysqli_error($connect));
-            }
-            
-            // Commit transaction if both queries succeeded
-            mysqli_commit($connect);
-            
-            // Refresh the page to show updated data
-            header("Location: ".$_SERVER['PHP_SELF']);
-            exit;
-            
-        } catch (Exception $e) {
-            // Rollback transaction on error
-            mysqli_rollback($connect);
-            $error = "Error deleting shop and vendor account: " . $e->getMessage();
-        }
-    } elseif ($_POST['action'] === 'update_status') {
-        $vendor_id = (int)$_POST['vendor_id'];
-        $shop_id = (int)$_POST['shop_id'];
-        $status = mysqli_real_escape_string($connect, $_POST['status']);
-        
-        // Update status for this specific shop only
-        $update_query = "UPDATE vendor_accounts SET status = '$status' WHERE id = $vendor_id AND shop_id = $shop_id";
-        if (mysqli_query($connect, $update_query)) {
-            // Refresh the page to show updated data
-            header("Location: ".$_SERVER['PHP_SELF']);
-            exit;
-        } else {
-            $error = "Error updating vendor status: " . mysqli_error($connect);
-        }
+// Hardcoded admin credentials
+$admin_username = "adminfaheem";
+$admin_password = "faheemadmin";
+
+// Check if user is already logged in
+$is_logged_in = isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true;
+
+// Handle login
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'login') {
+    $username = $_POST['username'] ?? '';
+    $password = $_POST['password'] ?? '';
+    
+    if ($username === $admin_username && $password === $admin_password) {
+        $_SESSION['admin_logged_in'] = true;
+        $_SESSION['admin_username'] = $username;
+        $is_logged_in = true;
+    } else {
+        $login_error = "Invalid username or password!";
     }
 }
 
-// Handle form submissions
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
-    $shop_id = (int) $_POST['shop_id'];
-    $action = $_POST['action'];
+// Handle logout
+if (isset($_GET['logout'])) {
+    session_destroy();
+    header("Location: ".$_SERVER['PHP_SELF']);
+    exit;
+}
 
-    // Format WhatsApp number (convert 03xxxxxxxxx to +923xxxxxxxxx)
-    $whatsapp_number = preg_replace('/^0/', '92', $_POST['whatsapp_number']);
-    $whatsapp_number = '+' . ltrim($whatsapp_number, '+'); // Ensure it starts with +
+// Only proceed with database operations if user is logged in
+if ($is_logged_in) {
+    // Database connection
+    $connect = mysqli_connect('localhost', 'root', '', 'saloon');
+    if (!$connect) {
+        die("❌ Connection failed: " . mysqli_connect_error());
+    }
 
-    if ($action === 'approve') {
-        // Create vendor account
-        $username = mysqli_real_escape_string($connect, $_POST['username']);
-        $password = password_hash($_POST['password'], PASSWORD_DEFAULT);
-        $shop_name = mysqli_real_escape_string($connect, $_POST['shop_name']);
-        $account_date = date('Y-m-d'); // Current date in YYYY-MM-DD format
-        $cnic = mysqli_real_escape_string($connect, $_POST['cnic']);
-
-        // Start transaction
-        mysqli_begin_transaction($connect);
-
-        try {
-            // 1. Insert into vendor_accounts table with account_date and CNIC
-            $account_query = "INSERT INTO vendor_accounts (shop_id, username, password, account_date, cnic, status) 
-                             VALUES ($shop_id, '$username', '$password', '$account_date', '$cnic', 'working')";
-            if (!mysqli_query($connect, $account_query)) {
-                throw new Exception("Failed to insert into vendor_accounts: " . mysqli_error($connect));
+    // Handle extend and delete actions
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+        $action = $_POST['action'];
+        
+        if ($action === 'extend') {
+            $vendor_id = (int)($_POST['vendor_id'] ?? 0);
+            $shop_id = (int)($_POST['shop_id'] ?? 0);
+            $months = (int)($_POST['months'] ?? 0);
+            
+            if ($vendor_id > 0 && $shop_id > 0 && $months > 0) {
+                // Get current end date for this specific shop
+                $query = "SELECT account_date FROM vendor_accounts WHERE id = $vendor_id AND shop_id = $shop_id";
+                $result = mysqli_query($connect, $query);
+                if ($result && mysqli_num_rows($result) > 0) {
+                    $row = mysqli_fetch_assoc($result);
+                    $current_date = $row['account_date'];
+                    $new_date = date('Y-m-d', strtotime($current_date . " +$months month"));
+                    
+                    // Update account date for this specific shop
+                    $update_query = "UPDATE vendor_accounts SET account_date = '$new_date' WHERE id = $vendor_id AND shop_id = $shop_id";
+                    if (mysqli_query($connect, $update_query)) {
+                        // Refresh the page to show updated data
+                        header("Location: ".$_SERVER['PHP_SELF']);
+                        exit;
+                    } else {
+                        $error = "Error extending subscription: " . mysqli_error($connect);
+                    }
+                }
             }
-
-            // 2. Update shop status to approved
-            $status_query = "UPDATE register_shop SET status = 'approved', processed_at = NOW() 
-                            WHERE id = $shop_id";
-            if (!mysqli_query($connect, $status_query)) {
-                throw new Exception("Failed to update register_shop: " . mysqli_error($connect));
+        } elseif ($action === 'delete_vendor') {
+            $vendor_id = (int)($_POST['vendor_id'] ?? 0);
+            $shop_id = (int)($_POST['shop_id'] ?? 0);
+            
+            if ($vendor_id > 0 && $shop_id > 0) {
+                $delete_query = "DELETE FROM vendor_accounts WHERE id = $vendor_id AND shop_id = $shop_id";
+                if (mysqli_query($connect, $delete_query)) {
+                    // Refresh the page to show updated data
+                    header("Location: ".$_SERVER['PHP_SELF']);
+                    exit;
+                } else {
+                    $error = "Error deleting vendor: " . mysqli_error($connect);
+                }
             }
-
-            // Commit transaction
-            if (!mysqli_commit($connect)) {
-                throw new Exception("Commit failed: " . mysqli_error($connect));
+        } elseif ($action === 'delete_request') {
+            $shop_id = (int)($_POST['shop_id'] ?? 0);
+            
+            if ($shop_id > 0) {
+                $delete_query = "DELETE FROM register_shop WHERE id = $shop_id";
+                if (mysqli_query($connect, $delete_query)) {
+                    // Refresh the page to show updated data
+                    header("Location: ".$_SERVER['PHP_SELF']);
+                    exit;
+                } else {
+                    $error = "Error deleting registration request: " . mysqli_error($connect);
+                }
             }
-
-            // Prepare WhatsApp message with date information
-            $formatted_date = date('F j, Y', strtotime($account_date)); // Format as "Month Day, Year"
-            $message = "Congratulations! Your salon '$shop_name' has been approved on $formatted_date.\n\n" .
-                "Login details:\nUsername: $username\nPassword: {$_POST['password']}\n\n" .
-                "Please login and change your password immediately.";
-
-            // Redirect to WhatsApp
-            $whatsapp_url = "https://wa.me/$whatsapp_number?text=" . urlencode($message);
-            header("Location: $whatsapp_url");
-            exit;
-
-        } catch (Exception $e) {
-            // Rollback transaction on error
-            mysqli_rollback($connect);
-            $error = "Error processing approval: " . $e->getMessage();
-            error_log($error);
+        } elseif ($action === 'delete_shop') {
+            $cnic = mysqli_real_escape_string($connect, $_POST['cnic'] ?? '');
+            $shop_id = (int)($_POST['shop_id'] ?? 0);
+            
+            if ($shop_id > 0 && !empty($cnic)) {
+                // Start transaction
+                mysqli_begin_transaction($connect);
+                
+                try {
+                    // 1. Delete from vendor_accounts table for this specific shop
+                    $delete_vendor_query = "DELETE FROM vendor_accounts WHERE shop_id = $shop_id AND cnic = '$cnic'";
+                    if (!mysqli_query($connect, $delete_vendor_query)) {
+                        throw new Exception("Failed to delete from vendor_accounts: " . mysqli_error($connect));
+                    }
+                    
+                    // 2. Delete from register_shop table
+                    $delete_shop_query = "DELETE FROM register_shop WHERE id = $shop_id AND cnic = '$cnic'";
+                    if (!mysqli_query($connect, $delete_shop_query)) {
+                        throw new Exception("Failed to delete from register_shop: " . mysqli_error($connect));
+                    }
+                    
+                    // Commit transaction if both queries succeeded
+                    mysqli_commit($connect);
+                    
+                    // Refresh the page to show updated data
+                    header("Location: ".$_SERVER['PHP_SELF']);
+                    exit;
+                    
+                } catch (Exception $e) {
+                    // Rollback transaction on error
+                    mysqli_rollback($connect);
+                    $error = "Error deleting shop and vendor account: " . $e->getMessage();
+                }
+            }
+        } elseif ($action === 'update_status') {
+            $vendor_id = (int)($_POST['vendor_id'] ?? 0);
+            $shop_id = (int)($_POST['shop_id'] ?? 0);
+            $status = mysqli_real_escape_string($connect, $_POST['status'] ?? 'working');
+            
+            if ($vendor_id > 0 && $shop_id > 0) {
+                // Update status for this specific shop only
+                $update_query = "UPDATE vendor_accounts SET status = '$status' WHERE id = $vendor_id AND shop_id = $shop_id";
+                if (mysqli_query($connect, $update_query)) {
+                    // Refresh the page to show updated data
+                    header("Location: ".$_SERVER['PHP_SELF']);
+                    exit;
+                } else {
+                    $error = "Error updating vendor status: " . mysqli_error($connect);
+                }
+            }
         }
+    }
 
-    } elseif ($action === 'reject') {
-        $reason = mysqli_real_escape_string($connect, $_POST['rejection_reason']);
+    // Handle form submissions for approve/reject
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+        $action = $_POST['action'];
+        $shop_id = (int)($_POST['shop_id'] ?? 0);
+        
+        // Check if shop_id exists for approve/reject actions
+        if ($shop_id > 0 && in_array($action, ['approve', 'reject'])) {
+            // Format WhatsApp number (convert 03xxxxxxxxx to +923xxxxxxxxx)
+            $whatsapp_number = $_POST['whatsapp_number'] ?? '';
+            $whatsapp_number = preg_replace('/^0/', '92', $whatsapp_number);
+            $whatsapp_number = '+' . ltrim($whatsapp_number, '+'); // Ensure it starts with +
 
-        // Update shop status to rejected
-        $query = "UPDATE register_shop SET 
-                 status = 'rejected', 
-                 admin_notes = '$reason', 
-                 processed_at = NOW() 
-                 WHERE id = $shop_id";
+            if ($action === 'approve') {
+                // Create vendor account
+                $username = mysqli_real_escape_string($connect, $_POST['username'] ?? '');
+                $password = password_hash($_POST['password'] ?? '', PASSWORD_DEFAULT);
+                $shop_name = mysqli_real_escape_string($connect, $_POST['shop_name'] ?? '');
+                $account_date = date('Y-m-d'); // Current date in YYYY-MM-DD format
+                $cnic = mysqli_real_escape_string($connect, $_POST['cnic'] ?? '');
 
-        if (mysqli_query($connect, $query)) {
-            // Prepare rejection message
-            $message = "We regret to inform you that your salon application has been rejected.\n\n" .
-                "Reason: $reason\n\n" .
-                "Please contact support if you have any questions.";
+                // Start transaction
+                mysqli_begin_transaction($connect);
 
-            // Redirect to WhatsApp
-            $whatsapp_url = "https://wa.me/$whatsapp_number?text=" . urlencode($message);
-            header("Location: $whatsapp_url");
-            exit;
-        } else {
-            $error = "Error rejecting application: " . mysqli_error($connect);
-            error_log($error);
+                try {
+                    // 1. Insert into vendor_accounts table with account_date and CNIC
+                    $account_query = "INSERT INTO vendor_accounts (shop_id, username, password, account_date, cnic, status) 
+                                     VALUES ($shop_id, '$username', '$password', '$account_date', '$cnic', 'working')";
+                    if (!mysqli_query($connect, $account_query)) {
+                        throw new Exception("Failed to insert into vendor_accounts: " . mysqli_error($connect));
+                    }
+
+                    // 2. Update shop status to approved
+                    $status_query = "UPDATE register_shop SET status = 'approved', processed_at = NOW() 
+                                    WHERE id = $shop_id";
+                    if (!mysqli_query($connect, $status_query)) {
+                        throw new Exception("Failed to update register_shop: " . mysqli_error($connect));
+                    }
+
+                    // Commit transaction
+                    if (!mysqli_commit($connect)) {
+                        throw new Exception("Commit failed: " . mysqli_error($connect));
+                    }
+
+                    // Prepare WhatsApp message with date information
+                    $formatted_date = date('F j, Y', strtotime($account_date)); // Format as "Month Day, Year"
+                    $message = "Congratulations! Your salon '$shop_name' has been approved on $formatted_date.\n\n" .
+                        "Login details:\nUsername: $username\nPassword: {$_POST['password']}\n\n" .
+                        "Please login and change your password immediately.";
+
+                    // Redirect to WhatsApp
+                    $whatsapp_url = "https://wa.me/$whatsapp_number?text=" . urlencode($message);
+                    header("Location: $whatsapp_url");
+                    exit;
+
+                } catch (Exception $e) {
+                    // Rollback transaction on error
+                    mysqli_rollback($connect);
+                    $error = "Error processing approval: " . $e->getMessage();
+                    error_log($error);
+                }
+
+            } elseif ($action === 'reject') {
+                $reason = mysqli_real_escape_string($connect, $_POST['rejection_reason'] ?? '');
+
+                // Update shop status to rejected
+                $query = "UPDATE register_shop SET 
+                         status = 'rejected', 
+                         admin_notes = '$reason', 
+                         processed_at = NOW() 
+                         WHERE id = $shop_id";
+
+                if (mysqli_query($connect, $query)) {
+                    // Prepare rejection message
+                    $message = "We regret to inform you that your salon application has been rejected.\n\n" .
+                        "Reason: $reason\n\n" .
+                        "Please contact support if you have any questions.";
+
+                    // Redirect to WhatsApp
+                    $whatsapp_url = "https://wa.me/$whatsapp_number?text=" . urlencode($message);
+                    header("Location: $whatsapp_url");
+                    exit;
+                } else {
+                    $error = "Error rejecting application: " . mysqli_error($connect);
+                    error_log($error);
+                }
+            }
         }
     }
 }
@@ -199,6 +251,65 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     <title>Admin Panel - Salon Management</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
+        /* Add login form styles */
+        .login-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        .login-form {
+            background: white;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 400px;
+        }
+
+        .login-title {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #333;
+            font-size: 24px;
+            font-weight: 600;
+        }
+
+        .login-error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            text-align: center;
+            border: 1px solid #ffcdd2;
+        }
+
+        .login-header {
+            background: var(--dark);
+            color: white;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logout-btn {
+            background: var(--danger);
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+        }
+
+        .logout-btn:hover {
+            background: #c0392b;
+        }
+
         .action-buttons {
             display: flex;
             gap: 5px;
@@ -606,618 +717,743 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 </head>
 
 <body>
-    <div class="dashboard">
-        <!-- Sidebar -->
-        <div class="sidebar">
-            <div class="admin-profile">
-                <img src="../images/akash.png" alt="Admin" class="admin-avatar">
-                <h3 class="admin-name">Akash Meghwar</h3>
-                <p class="admin-role">Super Admin</p>
+    <?php if (!$is_logged_in): ?>
+        <!-- Login Form -->
+        <div class="login-container">
+            <div class="login-form">
+                <h2 class="login-title">Admin Login</h2>
+                <?php if (isset($login_error)): ?>
+                    <div class="login-error"><?php echo $login_error; ?></div>
+                <?php endif; ?>
+                <form method="POST">
+                    <input type="hidden" name="action" value="login">
+                    <div class="form-group">
+                        <label for="username">Username</label>
+                        <input type="text" id="username" name="username" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="password">Password</label>
+                        <input type="password" id="password" name="password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width: 100%;">
+                        <i class="fas fa-sign-in-alt"></i> Login
+                    </button>
+                </form>
             </div>
-
-            <div class="nav-menu">
-                <div class="nav-item active" data-section="vendor-requests">
-                    <i class="fas fa-user-plus"></i>
-                    <span>Vendor Requests</span>
-                </div>
-                <div class="nav-item" data-section="subscriptions">
-                    <i class="fas fa-calendar-check"></i>
-                    <span>Subscriptions</span>
-                </div>
-                <div class="nav-item" data-section="payments">
-                    <i class="fas fa-credit-card"></i>
-                    <span>Payment Records</span>
-                </div>
-                <div class="nav-item" data-section="shop-management">
-                    <i class="fas fa-store"></i>
-                    <span>Shop Management</span>
-                </div>
+        </div>
+    <?php else: ?>
+        <!-- Admin Panel Content -->
+        <div class="login-header">
+            <h2>Admin Panel - Salon Management</h2>
+            <div>
+                <span>Welcome, <?php echo $_SESSION['admin_username']; ?></span>
+                <a href="?logout=true" class="logout-btn">
+                    <i class="fas fa-sign-out-alt"></i> Logout
+                </a>
             </div>
         </div>
 
-        <!-- Main Content -->
-        <div class="main-content">
-            <!-- Display errors if any -->
-            <?php if (!empty($error)): ?>
-                <div class="alert alert-danger"><?php echo $error; ?></div>
-            <?php endif; ?>
+        <div class="dashboard">
+            <!-- Sidebar -->
+            <div class="sidebar">
+                <div class="admin-profile">
+                    <img src="../images/faheem.jpg" alt="Admin" class="admin-avatar">
+                    <h3 class="admin-name">Faheem Ahmed</h3>
+                    <p class="admin-role">Admin</p>
+                </div>
 
-            <div class="header">
-                <h1 class="page-title" id="pageTitle">Vendor Requests</h1>
-                <div class="user-actions">
-                    <button class="btn btn-primary" id="refreshBtn">
-                        <i class="fas fa-sync-alt"></i> Refresh
-                    </button>
+                <div class="nav-menu">
+                    <div class="nav-item active" data-section="vendor-requests">
+                        <i class="fas fa-user-plus"></i>
+                        <span>Vendor Requests</span>
+                    </div>
+                    <div class="nav-item" data-section="subscriptions">
+                        <i class="fas fa-calendar-check"></i>
+                        <span>Subscriptions</span>
+                    </div>
+                    <div class="nav-item" data-section="payments">
+                        <i class="fas fa-credit-card"></i>
+                        <span>Payment Records</span>
+                    </div>
+                    <div class="nav-item" data-section="shop-management">
+                        <i class="fas fa-store"></i>
+                        <span>Shop Management</span>
+                    </div>
                 </div>
             </div>
 
-            <!-- Vendor Requests Section -->
-            <div class="section active" id="vendor-requests">
-                <div class="card">
-                    <div class="card-header">
-                        <h3 class="card-title">New Registration Requests</h3>
-                    </div>
-                    <div class="table-responsive">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Shop Name</th>
-                                    <th>Owner</th>
-                                    <th>CNIC</th>
-                                    <th>Contact</th>
-                                    <th>Payment Proof</th>
-                                    <th>Amount</th>
-                                    <th>Status</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php
-                                // Fetch pending applications with error handling
-                                $query = "SELECT * FROM register_shop WHERE status = 'pending' ORDER BY created_at DESC";
-                                $result = mysqli_query($connect, $query);
+            <!-- Main Content -->
+            <div class="main-content">
+                <!-- Display errors if any -->
+                <?php if (!empty($error)): ?>
+                    <div class="alert alert-danger"><?php echo $error; ?></div>
+                <?php endif; ?>
 
-                                if ($result && mysqli_num_rows($result) > 0) {
-                                    while ($row = mysqli_fetch_assoc($result)) {
-                                        // Unserialize images if needed
-                                        $shop_images = !empty($row['shop_images']) ? unserialize($row['shop_images']) : [];
-                                        $payment_proof = $row['payment_proof'];
-
-                                        echo '<tr data-shop-id="' . $row['id'] . '">';
-                                        echo '<td>' . htmlspecialchars($row['shop_name']) . '</td>';
-                                        echo '<td>' . htmlspecialchars($row['owner_name']) . '</td>';
-                                        echo '<td>' . htmlspecialchars($row['cnic']) . '</td>';
-                                        echo '<td>' . htmlspecialchars($row['whatsapp_number']) . '</td>';
-                                        echo '<td>';
-                                        echo '<button class="btn btn-sm btn-primary view-proof" data-image="' . htmlspecialchars($payment_proof) . '">View</button>';
-                                        echo '</td>';
-                                        echo '<td>Rs. 1,500</td>';
-                                        echo '<td><span class="badge badge-warning">Pending</span></td>';
-                                        echo '<td class="action-buttons">';
-                                        echo '<button class="btn btn-sm btn-success verify-btn" 
-                                                data-shop-id="' . $row['id'] . '"
-                                                data-shop-name="' . htmlspecialchars($row['shop_name']) . '"
-                                                data-owner-name="' . htmlspecialchars($row['owner_name']) . '"
-                                                data-whatsapp="' . htmlspecialchars($row['whatsapp_number']) . '"
-                                                data-cnic="' . htmlspecialchars($row['cnic']) . '">
-                                                <i class="fas fa-check"></i> Verify
-                                              </button>';
-                                        echo '<button class="btn btn-sm btn-danger reject-btn" 
-                                                data-shop-id="' . $row['id'] . '"
-                                                data-whatsapp="' . htmlspecialchars($row['whatsapp_number']) . '">
-                                                <i class="fas fa-times"></i> Reject
-                                              </button>';
-                                        echo '<button class="btn btn-sm btn-warning delete-request-btn" 
-                                                data-shop-id="' . $row['id'] . '">
-                                                <i class="fas fa-trash"></i> Delete
-                                              </button>';
-                                        echo '</td>';
-                                        echo '</tr>';
-                                    }
-                                } else {
-                                    echo '<tr><td colspan="8" class="text-center">No pending applications found</td></tr>';
-                                }
-                                ?>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- Verification Form (Hidden by Default) -->
-                <div class="card" id="verificationForm" style="display: none;">
-                    <div class="card-header">
-                        <h3 class="card-title">Create Vendor Account</h3>
-                    </div>
-                    <form id="vendorAccountForm" method="POST">
-                        <input type="hidden" name="shop_id" id="formShopId">
-                        <input type="hidden" name="whatsapp_number" id="formWhatsapp">
-                        <input type="hidden" name="action" value="approve">
-
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="shopName">Shop Name</label>
-                                <input type="text" id="shopName" name="shop_name" readonly>
-                            </div>
-                            <div class="form-group">
-                                <label for="ownerName">Owner Name</label>
-                                <input type="text" id="ownerName" name="owner_name" readonly>
-                            </div>
-                        </div>
-
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="cnic">CNIC*</label>
-                                <input type="text" id="cnic" name="cnic" pattern="[0-9]{5}-[0-9]{7}-[0-9]{1}" 
-                                       placeholder="XXXXX-XXXXXXX-X" required>
-                                <small class="text-muted">Format: XXXXX-XXXXXXX-X</small>
-                            </div>
-                            <div class="form-group">
-                                <label for="whatsappNum">WhatsApp Number</label>
-                                <input type="text" id="whatsappNum" name="whatsapp_display" readonly>
-                            </div>
-                        </div>
-
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="username">Username*</label>
-                                <input type="text" id="username" name="username" required>
-                            </div>
-                            <div class="form-group">
-                                <label for="password">Password*</label>
-                                <input type="password" id="password" name="password" required>
-                            </div>
-                        </div>
-
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="accountDate">Account Date</label>
-                                <input type="text" id="accountDate" name="account_date"
-                                    value="<?php echo date('F j, Y'); ?>" readonly>
-                            </div>
-                            <div class="form-group">
-                                <!-- Empty column for alignment -->
-                            </div>
-                        </div>
-
-                        <button type="submit" class="btn btn-primary">
-                            <i class="fas fa-save"></i> Create Account & Notify
+                <div class="header">
+                    <h1 class="page-title" id="pageTitle">Vendor Requests</h1>
+                    <div class="user-actions">
+                        <button class="btn btn-primary" id="refreshBtn">
+                            <i class="fas fa-sync-alt"></i> Refresh
                         </button>
-                    </form>
+                    </div>
                 </div>
 
-                <!-- Rejection Modal (Hidden by Default) -->
-                <div class="modal" id="rejectionModal" style="display: none;">
-                    <div class="modal-content">
-                        <div class="modal-header">
-                            <h4>Reject Application</h4>
-                            <span class="close-modal">&times;</span>
+                <!-- Vendor Requests Section -->
+                <div class="section active" id="vendor-requests">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3 class="card-title">New Registration Requests</h3>
                         </div>
-                        <form id="rejectionForm" method="POST">
-                            <input type="hidden" name="shop_id" id="rejectShopId">
-                            <input type="hidden" name="whatsapp_number" id="rejectWhatsapp">
-                            <input type="hidden" name="action" value="reject">
+                        <div class="table-responsive">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Shop Name</th>
+                                        <th>Owner</th>
+                                        <th>CNIC</th>
+                                        <th>Contact</th>
+                                        <th>Payment Proof</th>
+                                        <th>Amount</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php
+                                    if (isset($connect)) {
+                                        // Fetch pending applications with error handling
+                                        $query = "SELECT * FROM register_shop WHERE status = 'pending' ORDER BY created_at DESC";
+                                        $result = mysqli_query($connect, $query);
 
-                            <div class="form-group">
-                                <label for="rejectionReason">Reason for Rejection</label>
-                                <textarea id="rejectionReason" name="rejection_reason" required></textarea>
+                                        if ($result && mysqli_num_rows($result) > 0) {
+                                            while ($row = mysqli_fetch_assoc($result)) {
+                                                // Unserialize images if needed
+                                                $shop_images = !empty($row['shop_images']) ? unserialize($row['shop_images']) : [];
+                                                $payment_proof = $row['payment_proof'];
+
+                                                echo '<tr data-shop-id="' . $row['id'] . '">';
+                                                echo '<td>' . htmlspecialchars($row['shop_name']) . '</td>';
+                                                echo '<td>' . htmlspecialchars($row['owner_name']) . '</td>';
+                                                echo '<td>' . htmlspecialchars($row['cnic']) . '</td>';
+                                                echo '<td>' . htmlspecialchars($row['whatsapp_number']) . '</td>';
+                                                echo '<td>';
+                                                echo '<button class="btn btn-sm btn-primary view-proof" data-image="' . htmlspecialchars($payment_proof) . '">View</button>';
+                                                echo '</td>';
+                                                echo '<td>Rs. 1,500</td>';
+                                                echo '<td><span class="badge badge-warning">Pending</span></td>';
+                                                echo '<td class="action-buttons">';
+                                                echo '<button class="btn btn-sm btn-success verify-btn" 
+                                                        data-shop-id="' . $row['id'] . '"
+                                                        data-shop-name="' . htmlspecialchars($row['shop_name']) . '"
+                                                        data-owner-name="' . htmlspecialchars($row['owner_name']) . '"
+                                                        data-whatsapp="' . htmlspecialchars($row['whatsapp_number']) . '"
+                                                        data-cnic="' . htmlspecialchars($row['cnic']) . '">
+                                                        <i class="fas fa-check"></i> Verify
+                                                      </button>';
+                                                echo '<button class="btn btn-sm btn-danger reject-btn" 
+                                                        data-shop-id="' . $row['id'] . '"
+                                                        data-whatsapp="' . htmlspecialchars($row['whatsapp_number']) . '">
+                                                        <i class="fas fa-times"></i> Reject
+                                                      </button>';
+                                                echo '<button class="btn btn-sm btn-warning delete-request-btn" 
+                                                        data-shop-id="' . $row['id'] . '">
+                                                        <i class="fas fa-trash"></i> Delete
+                                                      </button>';
+                                                echo '</td>';
+                                                echo '</tr>';
+                                            }
+                                        } else {
+                                            echo '<tr><td colspan="8" class="text-center">No pending applications found</td></tr>';
+                                        }
+                                    }
+                                    ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Verification Form (Hidden by Default) -->
+                    <div class="card" id="verificationForm" style="display: none;">
+                        <div class="card-header">
+                            <h3 class="card-title">Create Vendor Account</h3>
+                        </div>
+                        <form id="vendorAccountForm" method="POST">
+                            <input type="hidden" name="shop_id" id="formShopId">
+                            <input type="hidden" name="whatsapp_number" id="formWhatsapp">
+                            <input type="hidden" name="action" value="approve">
+
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="shopName">Shop Name</label>
+                                    <input type="text" id="shopName" name="shop_name" readonly>
+                                </div>
+                                <div class="form-group">
+                                    <label for="ownerName">Owner Name</label>
+                                    <input type="text" id="ownerName" name="owner_name" readonly>
+                                </div>
                             </div>
 
-                            <button type="submit" class="btn btn-danger">
-                                <i class="fas fa-times"></i> Confirm Rejection
-                            </button>
-                        </form>
-                    </div>
-                </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="cnic">CNIC*</label>
+                                    <input type="text" id="cnic" name="cnic" pattern="[0-9]{5}-[0-9]{7}-[0-9]{1}" 
+                                           placeholder="XXXXX-XXXXXXX-X" required>
+                                    <small class="text-muted">Format: XXXXX-XXXXXXX-X</small>
+                                </div>
+                                <div class="form-group">
+                                    <label for="whatsappNum">WhatsApp Number</label>
+                                    <input type="text" id="whatsappNum" name="whatsapp_display" readonly>
+                                </div>
+                            </div>
 
-                <!-- Delete Request Modal -->
-                <div class="modal" id="deleteRequestModal" style="display: none;">
-                    <div class="modal-content">
-                        <div class="modal-header">
-                            <h4>Delete Registration Request</h4>
-                            <span class="close-modal">&times;</span>
-                        </div>
-                        <form id="deleteRequestForm" method="POST">
-                            <input type="hidden" name="shop_id" id="deleteRequestShopId">
-                            <input type="hidden" name="action" value="delete_request">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="username">Username*</label>
+                                    <input type="text" id="username" name="username" required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="password">Password*</label>
+                                    <input type="password" id="password" name="password" required>
+                                </div>
+                            </div>
 
-                            <p>Are you sure you want to delete this registration request? This action cannot be undone and will permanently remove the application.</p>
-
-                            <button type="submit" class="btn btn-danger">
-                                <i class="fas fa-trash"></i> Confirm Delete
-                            </button>
-                            <button type="button" class="btn btn-secondary close-modal">
-                                Cancel
-                            </button>
-                        </form>
-                    </div>
-                </div>
-
-                <!-- Payment Proof Lightbox -->
-                <div id="paymentProofModal" class="modal" style="display: none;">
-                    <span class="close">&times;</span>
-                    <img class="modal-content" id="proofImage">
-                </div>
-            </div>
-
-            <!-- Subscriptions Section -->
-            <div class="section" id="subscriptions">
-                <div class="card">
-                    <div class="card-header">
-                        <h3 class="card-title">Active Subscriptions</h3>
-                        <div>
-                            <select class="btn btn-sm" id="subscriptionFilter">
-                                <option value="active">Active</option>
-                                <option value="pending">Pending</option>
-                                <option value="expired">Expired</option>
-                                <option value="all">All</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="table-responsive">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Shop Name</th>
-                                    <th>Owner</th>
-                                    <th>CNIC</th>
-                                    <th>Start Date</th>
-                                    <th>End Date</th>
-                                    <th>Status</th>
-                                    <th>Account Status</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php
-                                // Fetch vendor accounts with shop information
-                                $query = "SELECT va.*, rs.id as shop_id, rs.shop_name, rs.owner_name, rs.whatsapp_number, rs.cnic 
-                                          FROM vendor_accounts va
-                                          JOIN register_shop rs ON va.shop_id = rs.id
-                                          ORDER BY va.account_date DESC";
-                                $result = mysqli_query($connect, $query);
-
-                                if ($result && mysqli_num_rows($result) > 0) {
-                                    while ($row = mysqli_fetch_assoc($result)) {
-                                        $start_date = date('M j, Y', strtotime($row['account_date']));
-                                        $end_date = date('M j, Y', strtotime($row['account_date'] . ' +1 month'));
-                                        $current_date = date('Y-m-d');
-                                        $status = (strtotime($current_date) <= strtotime($end_date)) ? 'active' : 'expired';
-                                        $account_status = $row['status'] ?? 'working'; // Default to working if status not set
-
-                                        echo '<tr data-shop-id="' . $row['shop_id'] . '">';
-                                        echo '<td>' . htmlspecialchars($row['shop_name']) . '</td>';
-                                        echo '<td>' . htmlspecialchars($row['owner_name']) . '</td>';
-                                        echo '<td>' . htmlspecialchars($row['cnic']) . '</td>';
-                                        echo '<td>' . $start_date . '</td>';
-                                        echo '<td>' . $end_date . '</td>';
-                                        echo '<td><span class="badge ' . ($status == 'active' ? 'badge-success' : 'badge-warning') . '">' . ucfirst($status) . '</span></td>';
-                                        echo '<td><span class="badge ' . ($account_status == 'working' ? 'badge-success' : 'badge-danger') . '">' . ucfirst($account_status) . '</span></td>';
-                                        echo '<td class="action-buttons">';
-                                        echo '<button class="btn btn-sm btn-primary extend-btn" 
-                                                data-vendor-id="' . $row['id'] . '"
-                                                data-shop-id="' . $row['shop_id'] . '"
-                                                data-whatsapp="' . htmlspecialchars($row['whatsapp_number']) . '">
-                                                <i class="fas fa-calendar-plus"></i> Extend
-                                              </button>';
-                                        echo '<button class="btn btn-sm ' . ($account_status == 'working' ? 'btn-danger' : 'btn-success') . ' status-btn" 
-                                                data-vendor-id="' . $row['id'] . '"
-                                                data-shop-id="' . $row['shop_id'] . '"
-                                                data-current-status="' . $account_status . '">
-                                                <i class="fas ' . ($account_status == 'working' ? 'fa-ban' : 'fa-check-circle') . '"></i> ' . ($account_status == 'working' ? 'Block' : 'Unblock') . '
-                                              </button>';
-                                        echo '<button class="btn btn-sm btn-danger delete-shop-btn" 
-                                                data-shop-id="' . $row['shop_id'] . '"
-                                                data-cnic="' . htmlspecialchars($row['cnic']) . '">
-                                                <i class="fas fa-trash"></i> Delete Shop
-                                              </button>';
-                                        echo '<button class="btn btn-sm btn-success whatsapp-btn" 
-                                                data-whatsapp="' . htmlspecialchars($row['whatsapp_number']) . '">
-                                                <i class="fas fa-comment"></i> Message
-                                              </button>';
-                                        echo '</td>';
-                                        echo '</tr>';
-                                    }
-                                } else {
-                                    echo '<tr><td colspan="8" class="text-center">No vendor accounts found</td></tr>';
-                                }
-                                ?>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- Extend Subscription Modal -->
-                <div class="modal" id="extendModal" style="display: none;">
-                    <div class="modal-content">
-                        <div class="modal-header">
-                            <h4>Extend Subscription</h4>
-                            <span class="close-modal">&times;</span>
-                        </div>
-                        <form id="extendForm" method="POST">
-                            <input type="hidden" name="vendor_id" id="extendVendorId">
-                            <input type="hidden" name="shop_id" id="extendShopId">
-                            <input type="hidden" name="action" value="extend">
-
-                            <div class="form-group">
-                                <label for="extendMonths">Extend by (months)</label>
-                                <select id="extendMonths" name="months" class="form-control">
-                                    <option value="1">1 Month</option>
-                                    <option value="3">3 Months</option>
-                                    <option value="6">6 Months</option>
-                                    <option value="12">12 Months</option>
-                                </select>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="accountDate">Account Date</label>
+                                    <input type="text" id="accountDate" name="account_date"
+                                        value="<?php echo date('F j, Y'); ?>" readonly>
+                                </div>
+                                <div class="form-group">
+                                    <!-- Empty column for alignment -->
+                                </div>
                             </div>
 
                             <button type="submit" class="btn btn-primary">
-                                <i class="fas fa-save"></i> Extend Subscription
+                                <i class="fas fa-save"></i> Create Account & Notify
                             </button>
                         </form>
                     </div>
-                </div>
 
-                <!-- Status Update Modal -->
-                <div class="modal" id="statusModal" style="display: none;">
-                    <div class="modal-content">
-                        <div class="modal-header">
-                            <h4>Update Account Status</h4>
-                            <span class="close-modal">&times;</span>
+                    <!-- Rejection Modal (Hidden by Default) -->
+                    <div class="modal" id="rejectionModal" style="display: none;">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h4>Reject Application</h4>
+                                <span class="close-modal">&times;</span>
+                            </div>
+                            <form id="rejectionForm" method="POST">
+                                <input type="hidden" name="shop_id" id="rejectShopId">
+                                <input type="hidden" name="whatsapp_number" id="rejectWhatsapp">
+                                <input type="hidden" name="action" value="reject">
+
+                                <div class="form-group">
+                                    <label for="rejectionReason">Reason for Rejection</label>
+                                    <textarea id="rejectionReason" name="rejection_reason" required></textarea>
+                                </div>
+
+                                <button type="submit" class="btn btn-danger">
+                                    <i class="fas fa-times"></i> Confirm Rejection
+                                </button>
+                            </form>
                         </div>
-                        <form id="statusForm" method="POST">
-                            <input type="hidden" name="vendor_id" id="statusVendorId">
-                            <input type="hidden" name="shop_id" id="statusShopId">
-                            <input type="hidden" name="action" value="update_status">
-                            <input type="hidden" name="status" id="newStatus">
+                    </div>
 
-                            <p id="statusMessage">Are you sure you want to block this vendor account?</p>
+                    <!-- Delete Request Modal -->
+                    <div class="modal" id="deleteRequestModal" style="display: none;">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h4>Delete Registration Request</h4>
+                                <span class="close-modal">&times;</span>
+                            </div>
+                            <form id="deleteRequestForm" method="POST">
+                                <input type="hidden" name="shop_id" id="deleteRequestShopId">
+                                <input type="hidden" name="action" value="delete_request">
 
-                            <button type="submit" class="btn btn-primary" id="confirmStatusBtn">
-                                <i class="fas fa-save"></i> Confirm
-                            </button>
-                            <button type="button" class="btn btn-secondary close-modal">
-                                Cancel
-                            </button>
-                        </form>
+                                <p>Are you sure you want to delete this registration request? This action cannot be undone and will permanently remove the application.</p>
+
+                                <button type="submit" class="btn btn-danger">
+                                    <i class="fas fa-trash"></i> Confirm Delete
+                                </button>
+                                <button type="button" class="btn btn-secondary close-modal">
+                                    Cancel
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Payment Proof Lightbox -->
+                    <div id="paymentProofModal" class="modal" style="display: none;">
+                        <span class="close">&times;</span>
+                        <img class="modal-content" id="proofImage">
                     </div>
                 </div>
 
-                <!-- Delete Shop Confirmation Modal -->
-                <div class="modal" id="deleteShopModal" style="display: none;">
-                    <div class="modal-content">
-                        <div class="modal-header">
-                            <h4>Confirm Shop Deletion</h4>
-                            <span class="close-modal">&times;</span>
+                <!-- Subscriptions Section -->
+                <div class="section" id="subscriptions">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3 class="card-title">Active Subscriptions</h3>
+                            <div>
+                                <select class="btn btn-sm" id="subscriptionFilter">
+                                    <option value="active">Active</option>
+                                    <option value="pending">Pending</option>
+                                    <option value="expired">Expired</option>
+                                    <option value="all">All</option>
+                                </select>
+                            </div>
                         </div>
-                        <form id="deleteShopForm" method="POST">
-                            <input type="hidden" name="shop_id" id="deleteShopId">
-                            <input type="hidden" name="cnic" id="deleteShopCnic">
-                            <input type="hidden" name="action" value="delete_shop">
+                        <div class="table-responsive">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Shop Name</th>
+                                        <th>Owner</th>
+                                        <th>CNIC</th>
+                                        <th>Start Date</th>
+                                        <th>End Date</th>
+                                        <th>Status</th>
+                                        <th>Account Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php
+                                    if (isset($connect)) {
+                                        // Fetch vendor accounts with shop information
+                                        $query = "SELECT va.*, rs.id as shop_id, rs.shop_name, rs.owner_name, rs.whatsapp_number, rs.cnic 
+                                                  FROM vendor_accounts va
+                                                  JOIN register_shop rs ON va.shop_id = rs.id
+                                                  ORDER BY va.account_date DESC";
+                                        $result = mysqli_query($connect, $query);
 
-                            <p>Are you sure you want to delete this shop? This will permanently remove both the shop registration and vendor account from the system.</p>
+                                        if ($result && mysqli_num_rows($result) > 0) {
+                                            while ($row = mysqli_fetch_assoc($result)) {
+                                                $start_date = date('M j, Y', strtotime($row['account_date']));
+                                                $end_date = date('M j, Y', strtotime($row['account_date'] . ' +1 month'));
+                                                $current_date = date('Y-m-d');
+                                                $status = (strtotime($current_date) <= strtotime($end_date)) ? 'active' : 'expired';
+                                                $account_status = $row['status'] ?? 'working'; // Default to working if status not set
 
-                            <button type="submit" class="btn btn-danger">
-                                <i class="fas fa-trash"></i> Confirm Delete
-                            </button>
-                            <button type="button" class="btn btn-secondary close-modal">
-                                Cancel
-                            </button>
-                        </form>
+                                                echo '<tr data-shop-id="' . $row['shop_id'] . '">';
+                                                echo '<td>' . htmlspecialchars($row['shop_name']) . '</td>';
+                                                echo '<td>' . htmlspecialchars($row['owner_name']) . '</td>';
+                                                echo '<td>' . htmlspecialchars($row['cnic']) . '</td>';
+                                                echo '<td>' . $start_date . '</td>';
+                                                echo '<td>' . $end_date . '</td>';
+                                                echo '<td><span class="badge ' . ($status == 'active' ? 'badge-success' : 'badge-warning') . '">' . ucfirst($status) . '</span></td>';
+                                                echo '<td><span class="badge ' . ($account_status == 'working' ? 'badge-success' : 'badge-danger') . '">' . ucfirst($account_status) . '</span></td>';
+                                                echo '<td class="action-buttons">';
+                                                echo '<button class="btn btn-sm btn-info extend-btn" 
+                                                        data-vendor-id="' . $row['id'] . '"
+                                                        data-shop-id="' . $row['shop_id'] . '"
+                                                        data-shop-name="' . htmlspecialchars($row['shop_name']) . '">
+                                                        <i class="fas fa-calendar-plus"></i> Extend
+                                                      </button>';
+                                                echo '<button class="btn btn-sm btn-warning status-btn" 
+                                                        data-vendor-id="' . $row['id'] . '"
+                                                        data-shop-id="' . $row['shop_id'] . '"
+                                                        data-current-status="' . $account_status . '"
+                                                        data-shop-name="' . htmlspecialchars($row['shop_name']) . '">
+                                                        <i class="fas fa-edit"></i> Status
+                                                      </button>';
+                                                echo '<button class="btn btn-sm btn-danger delete-vendor-btn" 
+                                                        data-vendor-id="' . $row['id'] . '"
+                                                        data-shop-id="' . $row['shop_id'] . '"
+                                                        data-shop-name="' . htmlspecialchars($row['shop_name']) . '">
+                                                        <i class="fas fa-trash"></i> Delete
+                                                      </button>';
+                                                echo '</td>';
+                                                echo '</tr>';
+                                            }
+                                        } else {
+                                            echo '<tr><td colspan="8" class="text-center">No vendor accounts found</td></tr>';
+                                        }
+                                    }
+                                    ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Extend Subscription Modal -->
+                    <div class="modal" id="extendModal" style="display: none;">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h4>Extend Subscription</h4>
+                                <span class="close-modal">&times;</span>
+                            </div>
+                            <form id="extendForm" method="POST">
+                                <input type="hidden" name="vendor_id" id="extendVendorId">
+                                <input type="hidden" name="shop_id" id="extendShopId">
+                                <input type="hidden" name="action" value="extend">
+
+                                <div class="form-group">
+                                    <label for="shopNameExtend">Shop Name</label>
+                                    <input type="text" id="shopNameExtend" readonly>
+                                </div>
+
+                                <div class="form-group">
+                                    <label for="months">Extend by (months)</label>
+                                    <select id="months" name="months" class="form-control" required>
+                                        <option value="1">1 Month</option>
+                                        <option value="3">3 Months</option>
+                                        <option value="6">6 Months</option>
+                                        <option value="12">12 Months</option>
+                                    </select>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary">
+                                    <i class="fas fa-calendar-plus"></i> Extend Subscription
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Status Update Modal -->
+                    <div class="modal" id="statusModal" style="display: none;">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h4>Update Vendor Status</h4>
+                                <span class="close-modal">&times;</span>
+                            </div>
+                            <form id="statusForm" method="POST">
+                                <input type="hidden" name="vendor_id" id="statusVendorId">
+                                <input type="hidden" name="shop_id" id="statusShopId">
+                                <input type="hidden" name="action" value="update_status">
+
+                                <div class="form-group">
+                                    <label for="shopNameStatus">Shop Name</label>
+                                    <input type="text" id="shopNameStatus" readonly>
+                                </div>
+
+                                <div class="form-group">
+                                    <label for="status">Account Status</label>
+                                    <select id="status" name="status" class="form-control" required>
+                                        <option value="working">Working</option>
+                                        <option value="suspended">Suspended</option>
+                                        <option value="maintenance">Maintenance</option>
+                                    </select>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary">
+                                    <i class="fas fa-save"></i> Update Status
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Delete Vendor Modal -->
+                    <div class="modal" id="deleteVendorModal" style="display: none;">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h4>Delete Vendor Account</h4>
+                                <span class="close-modal">&times;</span>
+                            </div>
+                            <form id="deleteVendorForm" method="POST">
+                                <input type="hidden" name="vendor_id" id="deleteVendorId">
+                                <input type="hidden" name="shop_id" id="deleteVendorShopId">
+                                <input type="hidden" name="action" value="delete_vendor">
+
+                                <p>Are you sure you want to delete this vendor account? This action cannot be undone and will permanently remove the vendor's access.</p>
+
+                                <button type="submit" class="btn btn-danger">
+                                    <i class="fas fa-trash"></i> Confirm Delete
+                                </button>
+                                <button type="button" class="btn btn-secondary close-modal">
+                                    Cancel
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Shop Management Section -->
+                <div class="section" id="shop-management">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3 class="card-title">All Shops</h3>
+                            <div>
+                                <select class="btn btn-sm" id="shopFilter">
+                                    <option value="all">All Shops</option>
+                                    <option value="approved">Approved</option>
+                                    <option value="pending">Pending</option>
+                                    <option value="rejected">Rejected</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Shop Name</th>
+                                        <th>Owner</th>
+                                        <th>CNIC</th>
+                                        <th>Contact</th>
+                                        <th>Status</th>
+                                        <th>Registration Date</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php
+                                    if (isset($connect)) {
+                                        // Fetch all shops with their status
+                                        $query = "SELECT * FROM register_shop ORDER BY created_at DESC";
+                                        $result = mysqli_query($connect, $query);
+
+                                        if ($result && mysqli_num_rows($result) > 0) {
+                                            while ($row = mysqli_fetch_assoc($result)) {
+                                                $status_class = '';
+                                                switch ($row['status']) {
+                                                    case 'approved':
+                                                        $status_class = 'badge-success';
+                                                        break;
+                                                    case 'rejected':
+                                                        $status_class = 'badge-danger';
+                                                        break;
+                                                    default:
+                                                        $status_class = 'badge-warning';
+                                                }
+
+                                                echo '<tr data-shop-id="' . $row['id'] . '">';
+                                                echo '<td>' . htmlspecialchars($row['shop_name']) . '</td>';
+                                                echo '<td>' . htmlspecialchars($row['owner_name']) . '</td>';
+                                                echo '<td>' . htmlspecialchars($row['cnic']) . '</td>';
+                                                echo '<td>' . htmlspecialchars($row['whatsapp_number']) . '</td>';
+                                                echo '<td><span class="badge ' . $status_class . '">' . ucfirst($row['status']) . '</span></td>';
+                                                echo '<td>' . date('M j, Y', strtotime($row['created_at'])) . '</td>';
+                                                echo '<td class="action-buttons">';
+                                                echo '<button class="btn btn-sm btn-info view-shop-btn" 
+                                                        data-shop-id="' . $row['id'] . '">
+                                                        <i class="fas fa-eye"></i> View
+                                                      </button>';
+                                                echo '<button class="btn btn-sm btn-danger delete-shop-btn" 
+                                                        data-shop-id="' . $row['id'] . '"
+                                                        data-cnic="' . htmlspecialchars($row['cnic']) . '"
+                                                        data-shop-name="' . htmlspecialchars($row['shop_name']) . '">
+                                                        <i class="fas fa-trash"></i> Delete
+                                                      </button>';
+                                                echo '</td>';
+                                                echo '</tr>';
+                                            }
+                                        } else {
+                                            echo '<tr><td colspan="7" class="text-center">No shops found</td></tr>';
+                                        }
+                                    }
+                                    ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Delete Shop Modal -->
+                    <div class="modal" id="deleteShopModal" style="display: none;">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h4>Delete Shop</h4>
+                                <span class="close-modal">&times;</span>
+                            </div>
+                            <form id="deleteShopForm" method="POST">
+                                <input type="hidden" name="shop_id" id="deleteShopId">
+                                <input type="hidden" name="cnic" id="deleteShopCnic">
+                                <input type="hidden" name="action" value="delete_shop">
+
+                                <p>Are you sure you want to delete this shop and all associated vendor accounts? This action cannot be undone and will permanently remove all data.</p>
+
+                                <button type="submit" class="btn btn-danger">
+                                    <i class="fas fa-trash"></i> Confirm Delete
+                                </button>
+                                <button type="button" class="btn btn-secondary close-modal">
+                                    Cancel
+                                </button>
+                            </form>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
-    </div>
 
-    <script>
-        // Refresh button functionality
-        document.getElementById('refreshBtn').addEventListener('click', function() {
-            location.reload();
-        });
+        <script>
+            // Navigation functionality
+            document.querySelectorAll('.nav-item').forEach(item => {
+                item.addEventListener('click', function() {
+                    const sectionId = this.getAttribute('data-section');
+                    
+                    // Update active nav item
+                    document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+                    this.classList.add('active');
+                    
+                    // Update active section
+                    document.querySelectorAll('.section').forEach(section => section.classList.remove('active'));
+                    document.getElementById(sectionId).classList.add('active');
+                    
+                    // Update page title
+                    const pageTitle = document.getElementById('pageTitle');
+                    pageTitle.textContent = this.querySelector('span').textContent;
+                });
+            });
 
-        // Status update button
-        document.querySelectorAll('.status-btn').forEach(btn => {
-            btn.addEventListener('click', function () {
-                const vendorId = this.getAttribute('data-vendor-id');
-                const shopId = this.getAttribute('data-shop-id');
-                const currentStatus = this.getAttribute('data-current-status');
-                const newStatus = currentStatus === 'working' ? 'blocked' : 'working';
+            // Refresh button functionality
+            document.getElementById('refreshBtn').addEventListener('click', function() {
+                location.reload();
+            });
+
+            // View payment proof
+            document.querySelectorAll('.view-proof').forEach(button => {
+                button.addEventListener('click', function() {
+                    const imagePath = this.getAttribute('data-image');
+                    const modal = document.getElementById('paymentProofModal');
+                    const modalImg = document.getElementById('proofImage');
+                    
+                    modal.style.display = 'block';
+                    modalImg.src = '../images/' + imagePath;
+                });
+            });
+
+            // Close modals
+            document.querySelectorAll('.close, .close-modal').forEach(closeBtn => {
+                closeBtn.addEventListener('click', function() {
+                    this.closest('.modal').style.display = 'none';
+                });
+            });
+
+            // Close modal when clicking outside
+            window.addEventListener('click', function(event) {
+                const modals = document.querySelectorAll('.modal');
+                modals.forEach(modal => {
+                    if (event.target === modal) {
+                        modal.style.display = 'none';
+                    }
+                });
+            });
+
+            // Verify button functionality
+            document.querySelectorAll('.verify-btn').forEach(button => {
+                button.addEventListener('click', function() {
+                    const shopId = this.getAttribute('data-shop-id');
+                    const shopName = this.getAttribute('data-shop-name');
+                    const ownerName = this.getAttribute('data-owner-name');
+                    const whatsapp = this.getAttribute('data-whatsapp');
+                    const cnic = this.getAttribute('data-cnic');
+
+                    // Populate form
+                    document.getElementById('formShopId').value = shopId;
+                    document.getElementById('shopName').value = shopName;
+                    document.getElementById('ownerName').value = ownerName;
+                    document.getElementById('formWhatsapp').value = whatsapp;
+                    document.getElementById('whatsappNum').value = whatsapp;
+                    document.getElementById('cnic').value = cnic;
+
+                    // Generate username and password
+                    const username = shopName.toLowerCase().replace(/\s+/g, '') + Math.floor(Math.random() * 1000);
+                    const password = Math.random().toString(36).slice(-8);
+
+                    document.getElementById('username').value = username;
+                    document.getElementById('password').value = password;
+
+                    // Show form
+                    document.getElementById('verificationForm').style.display = 'block';
+                    document.getElementById('verificationForm').scrollIntoView({ behavior: 'smooth' });
+                });
+            });
+
+            // Reject button functionality
+            document.querySelectorAll('.reject-btn').forEach(button => {
+                button.addEventListener('click', function() {
+                    const shopId = this.getAttribute('data-shop-id');
+                    const whatsapp = this.getAttribute('data-whatsapp');
+
+                    document.getElementById('rejectShopId').value = shopId;
+                    document.getElementById('rejectWhatsapp').value = whatsapp;
+                    document.getElementById('rejectionModal').style.display = 'block';
+                });
+            });
+
+            // Delete request button functionality
+            document.querySelectorAll('.delete-request-btn').forEach(button => {
+                button.addEventListener('click', function() {
+                    const shopId = this.getAttribute('data-shop-id');
+                    document.getElementById('deleteRequestShopId').value = shopId;
+                    document.getElementById('deleteRequestModal').style.display = 'block';
+                });
+            });
+
+            // Extend subscription button functionality
+            document.querySelectorAll('.extend-btn').forEach(button => {
+                button.addEventListener('click', function() {
+                    const vendorId = this.getAttribute('data-vendor-id');
+                    const shopId = this.getAttribute('data-shop-id');
+                    const shopName = this.getAttribute('data-shop-name');
+
+                    document.getElementById('extendVendorId').value = vendorId;
+                    document.getElementById('extendShopId').value = shopId;
+                    document.getElementById('shopNameExtend').value = shopName;
+                    document.getElementById('extendModal').style.display = 'block';
+                });
+            });
+
+            // Status update button functionality
+            document.querySelectorAll('.status-btn').forEach(button => {
+                button.addEventListener('click', function() {
+                    const vendorId = this.getAttribute('data-vendor-id');
+                    const shopId = this.getAttribute('data-shop-id');
+                    const shopName = this.getAttribute('data-shop-name');
+                    const currentStatus = this.getAttribute('data-current-status');
+
+                    document.getElementById('statusVendorId').value = vendorId;
+                    document.getElementById('statusShopId').value = shopId;
+                    document.getElementById('shopNameStatus').value = shopName;
+                    document.getElementById('status').value = currentStatus;
+                    document.getElementById('statusModal').style.display = 'block';
+                });
+            });
+
+            // Delete vendor button functionality
+            document.querySelectorAll('.delete-vendor-btn').forEach(button => {
+                button.addEventListener('click', function() {
+                    const vendorId = this.getAttribute('data-vendor-id');
+                    const shopId = this.getAttribute('data-shop-id');
+
+                    document.getElementById('deleteVendorId').value = vendorId;
+                    document.getElementById('deleteVendorShopId').value = shopId;
+                    document.getElementById('deleteVendorModal').style.display = 'block';
+                });
+            });
+
+            // Delete shop button functionality
+            document.querySelectorAll('.delete-shop-btn').forEach(button => {
+                button.addEventListener('click', function() {
+                    const shopId = this.getAttribute('data-shop-id');
+                    const cnic = this.getAttribute('data-cnic');
+                    const shopName = this.getAttribute('data-shop-name');
+
+                    document.getElementById('deleteShopId').value = shopId;
+                    document.getElementById('deleteShopCnic').value = cnic;
+                    
+                    // Update confirmation message
+                    const form = document.getElementById('deleteShopForm');
+                    const p = form.querySelector('p');
+                    p.textContent = `Are you sure you want to delete "${shopName}" and all associated vendor accounts? This action cannot be undone and will permanently remove all data.`;
+                    
+                    document.getElementById('deleteShopModal').style.display = 'block';
+                });
+            });
+
+            // CNIC input formatting
+            document.getElementById('cnic')?.addEventListener('input', function(e) {
+                let value = e.target.value.replace(/\D/g, '');
+                if (value.length > 13) value = value.slice(0, 13);
                 
-                document.getElementById('statusVendorId').value = vendorId;
-                document.getElementById('statusShopId').value = shopId;
-                document.getElementById('newStatus').value = newStatus;
-                
-                const message = `Are you sure you want to ${newStatus === 'blocked' ? 'block' : 'unblock'} this vendor account?`;
-                document.getElementById('statusMessage').textContent = message;
-                
-                document.getElementById('statusModal').style.display = 'block';
-            });
-        });
-
-        // Extend subscription button
-        document.querySelectorAll('.extend-btn').forEach(btn => {
-            btn.addEventListener('click', function () {
-                const vendorId = this.getAttribute('data-vendor-id');
-                const shopId = this.getAttribute('data-shop-id');
-                document.getElementById('extendVendorId').value = vendorId;
-                document.getElementById('extendShopId').value = shopId;
-                document.getElementById('extendModal').style.display = 'block';
-            });
-        });
-
-        // Delete shop button
-        document.querySelectorAll('.delete-shop-btn').forEach(btn => {
-            btn.addEventListener('click', function () {
-                const shopId = this.getAttribute('data-shop-id');
-                const cnic = this.getAttribute('data-cnic');
-                document.getElementById('deleteShopId').value = shopId;
-                document.getElementById('deleteShopCnic').value = cnic;
-                document.getElementById('deleteShopModal').style.display = 'block';
-            });
-        });
-
-        // WhatsApp message button
-        document.querySelectorAll('.whatsapp-btn').forEach(btn => {
-            btn.addEventListener('click', function () {
-                let whatsappNum = this.getAttribute('data-whatsapp');
-                whatsappNum = whatsappNum.replace(/^0/, '92');
-                whatsappNum = '+' + whatsappNum.replace(/^\+/, '');
-                window.open(`https://wa.me/${whatsappNum}`, '_blank');
-            });
-        });
-
-        // Filter subscriptions
-        document.getElementById('subscriptionFilter').addEventListener('change', function () {
-            const filter = this.value;
-            document.querySelectorAll('#subscriptions tbody tr').forEach(row => {
-                const status = row.querySelector('td:nth-child(6) .badge').textContent.toLowerCase();
-                if (filter === 'all' || status === filter) {
-                    row.style.display = '';
-                } else {
-                    row.style.display = 'none';
+                if (value.length > 5) {
+                    value = value.slice(0, 5) + '-' + value.slice(5);
                 }
+                if (value.length > 13) {
+                    value = value.slice(0, 13) + '-' + value.slice(13);
+                }
+                e.target.value = value;
             });
-        });
-        
-        // Navigation between sections
-        document.querySelectorAll('.nav-item').forEach(item => {
-            item.addEventListener('click', function () {
-                // Remove active class from all nav items
-                document.querySelectorAll('.nav-item').forEach(nav => {
-                    nav.classList.remove('active');
-                });
-
-                // Add active class to clicked nav item
-                this.classList.add('active');
-
-                // Hide all sections
-                document.querySelectorAll('.section').forEach(section => {
-                    section.classList.remove('active');
-                });
-
-                // Show selected section
-                const sectionId = this.getAttribute('data-section');
-                document.getElementById(sectionId).classList.add('active');
-
-                // Update page title
-                document.getElementById('pageTitle').textContent = this.querySelector('span').textContent;
-            });
-        });
-
-        // Verify button - show account creation form
-        document.querySelectorAll('.verify-btn').forEach(btn => {
-            btn.addEventListener('click', function () {
-                const shopId = this.getAttribute('data-shop-id');
-                const shopName = this.getAttribute('data-shop-name');
-                const ownerName = this.getAttribute('data-owner-name');
-                let whatsappNum = this.getAttribute('data-whatsapp');
-                const cnic = this.getAttribute('data-cnic');
-
-                // Format WhatsApp number (03xx -> +923xx)
-                whatsappNum = whatsappNum.replace(/^0/, '92');
-                whatsappNum = '+' + whatsappNum.replace(/^\+/, ''); // Ensure single +
-
-                // Fill form with data
-                document.getElementById('shopName').value = shopName;
-                document.getElementById('ownerName').value = ownerName;
-                document.getElementById('whatsappNum').value = whatsappNum;
-                document.getElementById('formShopId').value = shopId;
-                document.getElementById('formWhatsapp').value = whatsappNum;
-                document.getElementById('cnic').value = cnic;
-
-                // Generate suggested username
-                const username = shopName.toLowerCase().replace(/\s+/g, '_') + '_' + Math.floor(1000 + Math.random() * 9000);
-                document.getElementById('username').value = username;
-
-                // Generate random password
-                const password = Math.random().toString(36).slice(-8);
-                document.getElementById('password').value = password;
-
-                // Show form
-                document.getElementById('verificationForm').style.display = 'block';
-                document.getElementById('verificationForm').scrollIntoView({ behavior: 'smooth' });
-            });
-        });
-
-        // Reject button - show rejection modal
-        document.querySelectorAll('.reject-btn').forEach(btn => {
-            btn.addEventListener('click', function () {
-                const shopId = this.getAttribute('data-shop-id');
-                let whatsappNum = this.getAttribute('data-whatsapp');
-                
-                // Format WhatsApp number (03xx -> +923xx)
-                whatsappNum = whatsappNum.replace(/^0/, '92');
-                whatsappNum = '+' + whatsappNum.replace(/^\+/, ''); // Ensure single +
-
-                document.getElementById('rejectShopId').value = shopId;
-                document.getElementById('rejectWhatsapp').value = whatsappNum;
-                document.getElementById('rejectionModal').style.display = 'block';
-            });
-        });
-
-        // View payment proof
-        document.querySelectorAll('.view-proof').forEach(btn => {
-            btn.addEventListener('click', function () {
-                const imagePath = this.getAttribute('data-image');
-                const modal = document.getElementById('paymentProofModal');
-                const img = document.getElementById('proofImage');
-                
-                img.src = '../uploads/' + imagePath;
-                modal.style.display = 'block';
-            });
-        });
-
-        // Close modals
-        document.querySelectorAll('.close, .close-modal').forEach(closeBtn => {
-            closeBtn.addEventListener('click', function () {
-                this.closest('.modal').style.display = 'none';
-            });
-        });
-
-        // Close modal when clicking outside
-        window.addEventListener('click', function (event) {
-            if (event.target.className === 'modal') {
-                event.target.style.display = 'none';
-            }
-        });
-
-        // CNIC input formatting
-        document.getElementById('cnic').addEventListener('input', function (e) {
-            // Remove all non-digit characters
-            let value = this.value.replace(/\D/g, '');
-            
-            // Format as XXXXX-XXXXXXX-X
-            if (value.length > 5) {
-                value = value.substring(0, 5) + '-' + value.substring(5);
-            }
-            if (value.length > 13) {
-                value = value.substring(0, 13) + '-' + value.substring(13, 14);
-            }
-            
-            // Limit to 15 characters (5+7+1 + 2 dashes)
-            this.value = value.substring(0, 15);
-        });
-
-        // Form validation for vendor account creation
-        document.getElementById('vendorAccountForm').addEventListener('submit', function (e) {
-            const cnic = document.getElementById('cnic').value;
-            const cnicRegex = /^\d{5}-\d{7}-\d{1}$/;
-            
-            if (!cnicRegex.test(cnic)) {
-                e.preventDefault();
-                alert('Please enter a valid CNIC in the format XXXXX-XXXXXXX-X');
-                return false;
-            }
-            
-            return true;
-        });
-
-        // Delete request button
-        document.querySelectorAll('.delete-request-btn').forEach(btn => {
-            btn.addEventListener('click', function () {
-                const shopId = this.getAttribute('data-shop-id');
-                document.getElementById('deleteRequestShopId').value = shopId;
-                document.getElementById('deleteRequestModal').style.display = 'block';
-            });
-        });
-    </script>
+        </script>
+    <?php endif; ?>
 </body>
+
 </html>
